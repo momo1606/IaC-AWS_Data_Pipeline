@@ -1,0 +1,489 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Resources": {
+      "DataBucket": {
+        "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Delete",
+        "Properties": {
+          "BucketName": "kinesis-stream-outputs-ecommerce"
+        }
+      },
+      "EcommerceDataStream": {
+        "Type": "AWS::Kinesis::Stream",
+        "Properties": {
+          "Name": "ecommerce-raw-user-activity-stream",
+          "ShardCount": 1
+        }
+      },
+      "VPC": {
+        "Type": "AWS::EC2::VPC",
+        "Properties": {
+          "CidrBlock": "10.0.0.0/16",
+          "EnableDnsSupport": "true",
+          "EnableDnsHostnames": "true"
+        }
+      },
+      "InstanceRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "ec2.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/AmazonS3FullAccess",
+            "arn:aws:iam::aws:policy/AmazonKinesisFullAccess"
+          ]
+        }
+      },
+      "InstanceSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+          "GroupName": "InstanceSecurityGroup",
+          "GroupDescription": "Allow SSH access",
+          "VpcId": {
+            "Ref": "VPC"
+          },
+          "SecurityGroupIngress": [
+            {
+              "IpProtocol": "tcp",
+              "FromPort": 22,
+              "ToPort": 22,
+              "CidrIp": "0.0.0.0/0"
+            }
+          ]
+        }
+      },
+      "InstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Roles": [
+            {
+              "Ref": "InstanceRole"
+            }
+          ]
+        }
+      },
+      "EC2Instance": {
+        "Type": "AWS::EC2::Instance",
+        "Properties": {
+          "InstanceType": "t2.micro",
+          "ImageId": "ami-0a699202e5027c10d",  
+          "KeyName": "momo",
+          "IamInstanceProfile": {
+            "Ref": "InstanceProfile"
+          },
+          "UserData": {
+            "Fn::Base64": "#!/bin/bash\n#!/bin/bash\nexec > /home/ec2-user/user-data.log 2>&1\necho \"Starting user data script execution...\"\n\nyum update -y\nyum install -y python3\npip3 install boto3 || echo 'boto3 is already installed.'\n\nwhile true; do\n    if aws s3 ls \"s3://kinesis-stream-files-ecommerce/stream-data-app-simulation.py\"; then\n        break\n    fi\n    sleep 10\ndone\n\naws s3 cp \"s3://kinesis-stream-files-ecommerce/stream-data-app-simulation.py\" /home/ec2-user/stream-data-app-simulation.py\n\nchmod +x /home/ec2-user/stream-data-app-simulation.py\n\nexport S3_BUCKET=\"kinesis-stream-files-ecommerce\"\nexport S3_KEY=\"2019-Nov-sample.csv\"\nexport KINESIS_STREAM_NAME=\"ecommerce-raw-user-activity-stream\"\n\necho \"Running the Python script...\"\npython3 /home/ec2-user/stream-data-app-simulation.py > /home/ec2-user/script.log 2>&1\n"
+          }
+        }
+      },
+      "SubnetPublic": {
+        "Type": "AWS::EC2::Subnet",
+        "Properties": {
+          "VpcId": {
+            "Ref": "VPC"
+          },
+          "CidrBlock": "10.0.1.0/24",
+          "MapPublicIpOnLaunch": "true",
+          "AvailabilityZone": "us-east-1a"
+        }
+      },
+      "UserActivityTable": {
+        "Type": "AWS::DynamoDB::Table",
+        "Properties": {
+          "TableName": "UserActivityTable",
+          "AttributeDefinitions": [
+            {
+              "AttributeName": "user_id",
+              "AttributeType": "S"
+            },
+            {
+              "AttributeName": "txn_timestamp",
+              "AttributeType": "S"
+            }
+          ],
+          "KeySchema": [
+            {
+              "AttributeName": "user_id",
+              "KeyType": "HASH"
+            },
+            {
+              "AttributeName": "txn_timestamp",
+              "KeyType": "RANGE"
+            }
+          ],
+          "BillingMode": "PAY_PER_REQUEST"
+        }
+      },
+      "ClickstreamAnalyticsTopic": {
+        "Type": "AWS::SNS::Topic",
+        "Properties": {
+          "DisplayName": "Clickstream Analytics",
+          "TopicName": "ClickstreamAnalyticsTopic"
+        }
+      },
+      "ClickstreamAnalyticsSubscription": {
+        "Type": "AWS::SNS::Subscription",
+        "Properties": {
+          "TopicArn": {
+            "Ref": "ClickstreamAnalyticsTopic"
+          },
+          "Protocol": "email",
+          "Endpoint": "mrox165321@gmail.com"
+        }
+      },
+      "DataStreamProcessor": {
+        "Type": "AWS::Lambda::Function",
+        "Properties": {
+          "FunctionName": "DataStreamProcessor",
+          "Handler": "lambda/processor.lambda_handler",
+          "Role": {
+            "Fn::GetAtt": ["LambdaExecutionRole", "Arn"]
+          },
+          "Code": {
+            "S3Bucket": "kinesis-stream-files-ecommerce",
+            "S3Key": "lambda.zip"
+          },
+          "Runtime": "python3.8",
+          "Timeout": 300,
+          "MemorySize": 256,
+          "Environment": {
+            "Variables": {
+              "TABLE_NAME": {
+                "Ref": "UserActivityTable"
+              },
+              "SNS_TOPIC_ARN": {
+                "Ref": "ClickstreamAnalyticsTopic"
+              }
+            }
+          }
+        }
+      },
+      "LambdaExecutionRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess",
+            "arn:aws:iam::aws:policy/AmazonS3FullAccess",
+            "arn:aws:iam::aws:policy/AmazonSNSFullAccess"
+          ]
+        }
+      },
+      "MyGlueDatabase": {
+        "Type": "AWS::Glue::Database",
+        "Properties": {
+          "CatalogId": { "Ref": "AWS::AccountId" },
+          "DatabaseInput": {
+            "Name": "my_glue_database"
+          }
+        }
+      },
+      "MyGlueTable": {
+        "Type": "AWS::Glue::Table",
+        "Properties": {
+          "CatalogId": { "Ref": "AWS::AccountId" },
+          "DatabaseName": { "Ref": "MyGlueDatabase" },
+          "TableInput": {
+            "Name": "my_glue_table",
+            "StorageDescriptor": {
+              "Columns": [
+                { "Name": "event_time", "Type": "string" },
+                { "Name": "event_type", "Type": "string" },
+                { "Name": "product_id", "Type": "string" },
+                { "Name": "category_id", "Type": "string" },
+                { "Name": "category_code", "Type": "string" },
+                { "Name": "brand", "Type": "string" },
+                { "Name": "price", "Type": "string" },
+                { "Name": "user_id", "Type": "string" },
+                { "Name": "user_session", "Type": "string" },
+                { "Name": "txn_timestamp", "Type": "string" }
+              ],
+              "Location": { "Fn::Sub": "s3://${DataBucket}/processed-data/" },
+              "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+              "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+              "SerdeInfo": {
+                "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+              }
+            },
+            "TableType": "EXTERNAL_TABLE"
+          }
+        }
+      },
+      "FirehoseRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "firehose.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "Policies": [
+            {
+              "PolicyName": "FirehosePolicy",
+              "PolicyDocument": {
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "s3:*",
+                      "glue:*",
+                      "kinesis:*",
+                      "lambda:*"
+                    ],
+                    "Resource": "*"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "MyDeliveryStream": {
+        "Type": "AWS::KinesisFirehose::DeliveryStream",
+        "Properties": {
+          "DeliveryStreamType": "KinesisStreamAsSource",
+          "KinesisStreamSourceConfiguration": {
+            "KinesisStreamARN": { "Fn::GetAtt": ["EcommerceDataStream", "Arn"] },
+            "RoleARN": { "Fn::GetAtt": ["FirehoseRole", "Arn"] }
+          },
+          "ExtendedS3DestinationConfiguration": {
+            "BucketARN": { "Fn::GetAtt": ["DataBucket", "Arn"] },
+            "RoleARN": { "Fn::GetAtt": ["FirehoseRole", "Arn"] },
+            "BufferingHints": {
+              "SizeInMBs": 64,
+              "IntervalInSeconds": 30
+            },
+            "CompressionFormat": "UNCOMPRESSED",
+            "Prefix": "processed-data/",
+            "ErrorOutputPrefix": "error-data/",
+            "DataFormatConversionConfiguration": {
+              "SchemaConfiguration": {
+                "RoleARN": { "Fn::GetAtt": ["FirehoseRole", "Arn"] },
+                "DatabaseName": "my_glue_database",
+                "TableName": "my_glue_table",
+                "Region": "us-east-1"
+              },
+              "InputFormatConfiguration": {
+                "Deserializer": {
+                  "HiveJsonSerDe": {}
+                }
+              },
+              "OutputFormatConfiguration": {
+                "Serializer": {
+                  "ParquetSerDe": {}
+                }
+              },
+              "Enabled": true
+            },
+            "ProcessingConfiguration": {
+              "Enabled": "true",
+              "Processors": [
+                {
+                  "Type": "Lambda",
+                  "Parameters": [
+                    {
+                      "ParameterName": "LambdaArn",
+                      "ParameterValue": { "Fn::GetAtt": ["DataStreamProcessor", "Arn"] }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "LambdaInvokePermission": {
+        "Type": "AWS::Lambda::Permission",
+        "Properties": {
+          "Action": "lambda:InvokeFunction",
+          "FunctionName": { "Ref": "DataStreamProcessor" },
+          "Principal": "firehose.amazonaws.com",
+          "SourceArn": { "Fn::GetAtt": ["MyDeliveryStream", "Arn"] }
+        }
+      },
+      "ReportLambdaFunction": {
+        "Type": "AWS::Lambda::Function",
+        "Properties": {
+          "FunctionName": "ReportLambdaFunction",
+          "Handler": "report_lambda/report_lambda.lambda_handler",
+          "Role": { "Fn::GetAtt": ["ReportLambdaExecutionRole", "Arn"] },
+          "Code": {
+            "S3Bucket": "kinesis-stream-files-ecommerce",
+            "S3Key": "report_lambda.zip"
+          },
+          "Runtime": "python3.8",
+          "Timeout": 300,
+          "MemorySize": 256,
+          "Environment": {
+            "Variables": {
+              "TABLE_NAME": { "Ref": "UserActivityTable" },
+              "S3_BUCKET": "kinesis-stream-outputs-ecommerce",
+              "SNS_TOPIC_ARN": { "Ref": "ClickstreamAnalyticsTopic" }
+            }
+          }
+        }
+      },
+      "ReportLambdaExecutionRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "Policies": [
+            {
+              "PolicyName": "ReportLambdaPolicy",
+              "PolicyDocument": {
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "dynamodb:Scan",
+                      "dynamodb:GetItem",
+                      "dynamodb:Query",
+                      "s3:PutObject",
+                      "s3:GetObject",
+                      "s3:ListBucket",
+                      "sns:Publish"
+                    ],
+                    "Resource": "*"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "ReportAPI2": {
+        "Type": "AWS::ApiGateway::RestApi",
+        "Properties": {
+          "Name": "ReportAPI2",
+          "Description": "API Gateway for generating brand reports."
+        }
+      },
+      "ReportResource": {
+        "Type": "AWS::ApiGateway::Resource",
+        "Properties": {
+          "ParentId": { "Fn::GetAtt": ["ReportAPI2", "RootResourceId"] },
+          "PathPart": "report",
+          "RestApiId": { "Ref": "ReportAPI2" }
+        }
+      },
+      "ReportMethod2": {
+        "Type": "AWS::ApiGateway::Method",
+        "Properties": {
+          "RestApiId": { "Ref": "ReportAPI2" },
+          "ResourceId": { "Ref": "ReportResource" },
+          "HttpMethod": "POST",
+          "AuthorizationType": "NONE",
+          "Integration": {
+            "Type": "AWS_PROXY",
+            "IntegrationHttpMethod": "POST",
+            "Uri": { "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ReportLambdaFunction.Arn}/invocations" },
+            "IntegrationResponses": [
+              {
+                "StatusCode": "200"
+              }
+            ]
+          },
+          "MethodResponses": [
+            {
+              "StatusCode": "200"
+            }
+          ]
+        }
+      },
+      "ReportDeployment2": {
+        "Type": "AWS::ApiGateway::Deployment",
+        "DependsOn": ["ReportMethod2"],
+        "Properties": {
+          "RestApiId": { "Ref": "ReportAPI2" },
+          "StageName": "prod"
+        }
+      },
+      "ReportLambdaInvokePermission": {
+        "Type": "AWS::Lambda::Permission",
+        "Properties": {
+          "Action": "lambda:InvokeFunction",
+          "FunctionName": {"Fn::GetAtt": ["ReportLambdaFunction", "Arn"]},
+          "Principal": "apigateway.amazonaws.com",
+          "SourceArn": {
+            "Fn::Sub": "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ReportAPI2}/*/*/*"
+          }
+        }
+      }
+                  
+      
+    },
+    "Outputs": {
+      "DataBucketName": {
+        "Value": {
+          "Ref": "DataBucket"
+        },
+        "Description": "The name of the S3 bucket for storing data and scripts."
+      },
+      "KinesisDataStreamName": {
+        "Value": {
+          "Ref": "EcommerceDataStream"
+        },
+        "Description": "The name of the Kinesis data stream."
+      },
+      "UserActivityTableName": {
+        "Description": "The name of the DynamoDB table for storing user activities.",
+        "Value": {
+          "Ref": "UserActivityTable"
+        }
+      },
+      "ClickstreamAnalyticsTopicArn": {
+        "Description": "The ARN of the SNS topic for DDoS alerts.",
+        "Value": {
+          "Ref": "ClickstreamAnalyticsTopic"
+        }
+      },
+      "APIEndpoint": {
+        "Description": "The URL of the API Gateway endpoint for generating brand reports.",
+        "Value": {
+          "Fn::Sub": "https://${ReportAPI2}.execute-api.${AWS::Region}.amazonaws.com/prod/report"
+        }
+      }
+      
+    }
+  }
+  

@@ -74,5 +74,5 @@ def check_for_ddos(user_id, txn_timestamp):
         sns.publish(
             TopicArn=sns_topic_arn,
             Message=f"Potential DDoS detected for user {user_id}",
-            Subject="DDoS Alert"
+            Subject=f"DDoS Alert - {datetime.now().isoformat()}"
         )
