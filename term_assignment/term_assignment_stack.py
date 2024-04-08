@@ -294,11 +294,11 @@ python3 /home/ec2-user/stream-data-app-simulation.py > /home/ec2-user/script.log
         source_arn=firehose_stream.attr_arn
     )
         
-        lambda_apple = lambda_.Function(
-        self, 'LambdaApple',
+        report_lambda = lambda_.Function(
+        self, 'ReportLambdaFunction',
         runtime=lambda_.Runtime.PYTHON_3_8,
-        handler='lambda_apple.handler',
-        code=lambda_.Code.from_asset('term_assignment/lambda_apple'),  
+        handler='report_lambda.lambda_handler',
+        code=lambda_.Code.from_asset('term_assignment/report_lambda'),  
         environment={
             'TABLE_NAME': self.user_activity_table.table_name,
             'S3_BUCKET': self.data_bucket.bucket_name,
@@ -307,7 +307,7 @@ python3 /home/ec2-user/stream-data-app-simulation.py > /home/ec2-user/script.log
         timeout=Duration.seconds(300), 
         memory_size=256
     )
-        apple_policy = iam.PolicyStatement(
+        report_policy = iam.PolicyStatement(
         actions=[
             "dynamodb:Scan",
             "dynamodb:GetItem",
@@ -323,146 +323,44 @@ python3 /home/ec2-user/stream-data-app-simulation.py > /home/ec2-user/script.log
         ]
     )
 
-        lambda_apple.add_to_role_policy(apple_policy)
-        self.alert_topic.grant_publish(lambda_apple)
+        report_lambda.add_to_role_policy(report_policy)
+        self.alert_topic.grant_publish(report_lambda)
 
-        lambda_samsung = lambda_.Function(
-            self, 'LambdaSamsung',
-            runtime=lambda_.Runtime.PYTHON_3_8,
-            handler='lambda_samsung.handler',
-            code=lambda_.Code.from_asset('term_assignment/lambda_samsung'),  
-            environment={
-                'TABLE_NAME': self.user_activity_table.table_name,
-                'S3_BUCKET': self.data_bucket.bucket_name,
-                'SNS_TOPIC_ARN': self.alert_topic.topic_arn
-            },
-            timeout=Duration.seconds(300), 
-            memory_size=256 
-        )
-
-        samsung_policy = iam.PolicyStatement(
-        actions=[
-            "dynamodb:Scan",
-            "dynamodb:GetItem",
-            "dynamodb:Query",
-            "s3:PutObject",
-            "s3:GetObject",
-            "s3:ListBucket"
-        ],
-        resources=[
-            self.user_activity_table.table_arn,
-            self.data_bucket.bucket_arn,
-            f"{self.data_bucket.bucket_arn}/*"
-        ]
-    )
-
-        lambda_samsung.add_to_role_policy(samsung_policy)
-        self.alert_topic.grant_publish(lambda_samsung)
-
-        choice_state = sfn.Choice(self, "BrandChoice")
-
-        # Define the tasks for each brand processing
-        apple_task = tasks.LambdaInvoke(
-            self,
-            "AppleTask",
-            lambda_function=lambda_apple,
-            result_path="$.result"
-        )
-
-        samsung_task = tasks.LambdaInvoke(
-            self,
-            "SamsungTask",
-            lambda_function=lambda_samsung,
-            result_path="$.result"
-        )
-
-        # Configure the routing based on the brand
-        choice_state.when(sfn.Condition.string_equals("$.brand", "apple"), apple_task)
-        choice_state.when(sfn.Condition.string_equals("$.brand", "samsung"), samsung_task)
-
-        # Define the state machine
-        state_machine = sfn.StateMachine(
-            self,
-            "BrandStateMachine",
-            definition=choice_state.afterwards(),
-            timeout=Duration.minutes(5)
-        )
-
-        # Create an IAM role for API Gateway
-        api_gateway_role = iam.Role(
-            self,
-            "APIGatewayStepFunctionsRole",
-            assumed_by=iam.ServicePrincipal("apigateway.amazonaws.com")
-        )
-
-        # Attach a policy to the role to allow starting Step Functions executions
-        api_gateway_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["states:StartExecution"],
-                resources=[state_machine.state_machine_arn]
-            )
-        )
-
+        
         # Create an API Gateway REST API
-        rest_api = apigateway.RestApi(
+        report_api = apigateway.RestApi(
             self,
-            "StepFunctionsTriggerAPI",
-            rest_api_name="StepFunctionsTriggerAPI",
-            description="API Gateway to trigger Step Functions."
+            "ReportAPI",
+            rest_api_name="ReportAPI",
+            description="API Gateway for generating brand reports."
         )
 
-        # Create a resource for triggering the state machine
-        trigger_resource = rest_api.root.add_resource("trigger")
+        # Create a resource for the API Gateway
+        report_resource = report_api.root.add_resource("report")
+
+        # Define the Lambda integration
+        lambda_integration = apigateway.LambdaIntegration(
+            report_lambda,
+            request_templates={"application/json": '{ "statusCode": "200" }'}
+        )
 
         # Add a POST method to the resource
-        trigger_resource.add_method(
-            "POST",
-            integration=apigateway.AwsIntegration(
-                service="states",
-                action="StartExecution",
-                integration_http_method="POST",
-                options=apigateway.IntegrationOptions(
-                    credentials_role=api_gateway_role,
-                    integration_responses=[{
-                        "statusCode": "200"
-                    }],
-                    request_templates={
-                        "application/json": f"""
-                        {{
-                            "input": "$util.escapeJavaScript($input.json('$'))",
-                            "stateMachineArn": "{state_machine.state_machine_arn}"
-                        }}
-                        """
-                    }
-                )
-            ),
-            method_responses=[{
-                "statusCode": "200",
-                "responseModels": {
-                    "application/json": apigateway.Model.EMPTY_MODEL
-                }
-            }]
-        )
+        report_resource.add_method("POST", lambda_integration)
 
         # Deploy the API
-        deployment = apigateway.Deployment(
+        report_api_deployment = apigateway.Deployment(
             self,
-            "Deployment",
-            api=rest_api
-        )
-        stage_name = "prod1"
-
-        stage = apigateway.Stage(
-            self,
-            "Stage",
-            deployment=deployment,
-            stage_name=stage_name
+            "ReportAPIDeployment",
+            api=report_api
         )
 
-        rest_api.deployment_stage = stage
+        # Create a stage for the deployment
+        report_api_stage = apigateway.Stage(
+            self,
+            "ReportAPIStage",
+            deployment=report_api_deployment,
+            stage_name="prod2"
+        )
 
         # Output the URL of the API
-        CfnOutput(self, "APIEndpoint", value=f"{rest_api.url_for_path(trigger_resource.path)}")
-
-
-
+        CfnOutput(self, "APIEndpoint", value=f"{report_api.url_for_path(report_resource.path)}")
